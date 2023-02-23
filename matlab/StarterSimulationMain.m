@@ -36,18 +36,21 @@ ModemBandwidth = 8000.0;
 
 % Node position: [ [x, y, depth]; ... ]
 NodePositions = [ ...
-    [0.0, 0.0, 10.0]; ... 
-    [1800.0, 0.0, 10.0];
-    [0.0, 2000.0, 10.0]];
+        [0.0, 0.0, 10.0]; ... 
+        [900.0, 500.0, 10.0]; ...
+        [1100.0, -900.0, 10.0]; ...
+        [1900.0, -50.0, 10.0]; ...
+        [2400.0, -2000.0, 10.0] ...
+    ];
 
 % Calculate the Node Count
 NodeCount = length(NodePositions(:,1));
 
 % Node label: ['Name'; 'Name'; ... ]
-NodeLabels = ['A'; 'B'; 'C'];
+NodeLabels = ['A'; 'B'; 'C'; 'D'; 'E'];
 
 % Node addresses: [ 1; 2; 3; ... ]
-NodeAddresses = [1; 2; 3];
+NodeAddresses = [1; 2; 3; 4; 5];
 
 
 % Generate Lookup Tables
@@ -61,10 +64,11 @@ NodeDeliveryProbabilities = CalculateNodeDeliveryProbabilities(NodePositions, ..
 % ========================================================================
 
 % Print out information
+PrintNodeRanges(NodeRanges, NodeLabels);
 PrintNodeDeliveryProbabilities(NodeDeliveryProbabilities, NodeLabels);
 
 % Display the scene
-DisplayNodes(NodePositions, NodeLabels);
+DisplayNodes(NodePositions, NodeLabels, NodeDeliveryProbabilities);
 
 % Run a simulation
 RunSimulationA(NodePropagationDelays, NodeDeliveryProbabilities, NodeLabels, NodeAddresses, 1);
@@ -115,6 +119,12 @@ function RunSimulationA(NodePropagationDelays, NodeDeliveryProbabilities, NodeLa
         ReceivedPackets{NodeIdx} = {}; % Empty Queue of Received Packets
     end
 
+    % Log to record the state of each node at each time step.
+    NodeStateLogs = zeros(NodeIdx, RunStepCount);
+    NodeStateListening = 0;
+    NodeStateReceiving = 1;
+    NodeStateTransmitting = 2;
+
 
     for IterationIdx = 1:IterationCount
         
@@ -156,6 +166,12 @@ function RunSimulationA(NodePropagationDelays, NodeDeliveryProbabilities, NodeLa
                     
                     TransmittedPackets{NodeIdx}{length(TransmittedPackets{NodeIdx})+1} = TxPacket;
                     TransmittedPacketsEmpty = false;
+        
+
+                    % Recording the transmitting state
+                    %idx = sub2ind(size(NodeStateLogs),NodeIdx, StepIdx:StepIdx+floor(TxPacket.TransmitDuration*StepPeriod));
+                    %NodeStateLogs(sub2ind(size(NodeStateLogs),NodeIdx, StepIdx:StepIdx+floor(TxPacket.TransmitDuration*StepPeriod))) = NodeStateTransmitting;
+                    NodeStateLogs(NodeIdx, StepIdx:StepIdx+floor(TxPacket.TransmitDuration*StepFrequency)) = NodeStateTransmitting;
 
                     fprintf(['%09.3fs :Tx: ' 'Node ' NodeLabels(NodeIdx) ' has transmitted a packet. '], CurrentTime);
                     PrintPacket(TxPacket);
@@ -172,17 +188,14 @@ function RunSimulationA(NodePropagationDelays, NodeDeliveryProbabilities, NodeLa
                         % Delete from queue
                         TransmittedPackets{FromIdx}(1) = [];
     
+                        % Send the packet to all outgoing channels from
+                        % this node
                         for ToIdx = 1:NodeCount
-                            % Use the probability of packet success and randmise
-                            % whether this packet will arrive at the destination.
-                            ProbabilityOfPacketDelivery = NodeDeliveryProbabilities(FromIdx, ToIdx);
-                            if rand(1) < ProbabilityOfPacketDelivery
-                                % Only if the random number (0.0->1.0) is less than
-                                % the probability of delivery do we send the
-                                % packet and append to the Channel queue.
+                            if ToIdx ~= FromIdx  % Don't transmit to itself
+                                % Send the packet and append to the Channel queue.
                                 Channels{FromIdx, ToIdx}{length(Channels{FromIdx, ToIdx})+1} = TxPacket;
     
-                                ChannelsEmpty = false;
+                                ChannelsEmpty = false;                           
                             end
                         end
                     end
@@ -213,12 +226,26 @@ function RunSimulationA(NodePropagationDelays, NodeDeliveryProbabilities, NodeLa
                                 RxPacket = Channels{FromIdx, ToIdx}{1};
                                 % Delete from queue
                                 Channels{FromIdx, ToIdx}(1) = [];
-        
-                                % Put the packet into received packet queue for the
-                                % destination node to process in the next stage.
-                                ReceivedPackets{ToIdx}{length(ReceivedPackets{ToIdx})+1} = RxPacket;
 
-                                ReceivedPacketsEmpty = false;
+                                % Recording the receiving state
+                                NodeStateLogs(ToIdx, StepIdx-floor(RxPacket.TransmitDuration*StepFrequency):StepIdx) = NodeStateReceiving;
+        
+                                % Use the probability of packet success and randmise
+                                % whether this packet will arrive at the destination.
+                                ProbabilityOfPacketDelivery = NodeDeliveryProbabilities(FromIdx, ToIdx);
+                                if rand(1) < ProbabilityOfPacketDelivery
+                                    % Only if the random number (0.0->1.0) is less than
+                                    % the probability of delivery did the
+                                    % packet arrive.
+
+                                    % Put the packet into received packet queue for the
+                                    % destination node to process in the next stage.
+                                    ReceivedPackets{ToIdx}{length(ReceivedPackets{ToIdx})+1} = RxPacket;
+    
+                                    ReceivedPacketsEmpty = false;
+                                end
+
+                                
                             end
                         end
                     end
@@ -228,7 +255,7 @@ function RunSimulationA(NodePropagationDelays, NodeDeliveryProbabilities, NodeLa
 
 
             if ~ReceivedPacketsEmpty
-                % 3. Nodes act on received packets
+                % Nodes act on received packets
                 for NodeIdx = 1:NodeCount
                     while ~isempty(ReceivedPackets{NodeIdx})
                         % This node has just received some packets
@@ -250,6 +277,9 @@ function RunSimulationA(NodePropagationDelays, NodeDeliveryProbabilities, NodeLa
         end
 
     end
+
+    DisplayNodeStateLogs(NodeStateLogs, NodeLabels, StepPeriod);
+
 end
 
 
@@ -381,6 +411,27 @@ end
 
 % Printout Functions
 % ========================================================================
+function PrintNodeRanges(NodeRanges, NodeLabels)
+    NodeCount = length(NodeRanges(:,1));
+    
+    fprintf('Ranges (m)\n')
+    fprintf('\tTo:  \t')
+    for ToIdx = 1:NodeCount
+        fprintf([NodeLabels(ToIdx) '\t\t\t']);
+    end
+    fprintf('\n');
+
+    for FromIdx = 1:NodeCount
+        fprintf('From:\t');
+        fprintf([NodeLabels(FromIdx) '\t']);
+        for ToIdx = 1:NodeCount
+            fprintf('%09.3f\t', NodeRanges(FromIdx, ToIdx));
+        end
+        fprintf('\n');
+    end
+
+end
+
 function PrintNodeDeliveryProbabilities(NodeDeliveryProbabilities, NodeLabels)
     NodeCount = length(NodeDeliveryProbabilities(:,1));
     
@@ -427,10 +478,10 @@ end
 % Display Functions
 % ========================================================================
 
-function DisplayNodes(NodePositions, NodeLabels)
+function DisplayNodes(NodePositions, NodeLabels, NodeDeliveryProbabilities)
     % DisplayNodes - Show the locations of the nodes in 2D/3D space.
 
-    LimitsMargin = 10.0;
+    LimitsMargin = 50.0;
     Xlimits = [min(NodePositions(:,1))-LimitsMargin, max(NodePositions(:,1))+LimitsMargin];
     Ylimits = [min(NodePositions(:,2))-LimitsMargin, max(NodePositions(:,2))+LimitsMargin];
     Zlimits = [0.0, max(NodePositions(:,3))+LimitsMargin];
@@ -455,8 +506,69 @@ function DisplayNodes(NodePositions, NodeLabels)
     % Reverse direction of Z axis so that increasing depth goes downwards.
     fig.CurrentAxes.ZDir = 'Reverse';  
 
+    if nargin > 2
+        % Show Channel Probabilities
+        hold on;
+        NodeCount = length(NodePositions(:,1));
+        for FromIdx = 1:NodeCount
+            for ToIdx = 1:NodeCount
+                Label = sprintf('%0.3f', NodeDeliveryProbabilities(FromIdx, ToIdx));
+                DrawArrow(NodePositions(FromIdx, :), NodePositions(ToIdx, :));
+            end
+        end
+        hold off;
+    end
+
 end
 
+function DrawArrow(NodePositionA, NodePositionB)
+    % DrawArrow - Add an arrow on the plot from A to B. 
+    quiver3(NodePositionA(1), NodePositionA(2), NodePositionA(3), ...
+        NodePositionB(1)-NodePositionA(1), NodePositionB(2)-NodePositionA(2), NodePositionB(3)-NodePositionA(3),...
+        'filled', 'LineWidth', 1.0, 'AutoScale', 'off');
+end
+
+function DisplayNodeStateLogs(NodeStateLogs, NodeLabels, StepPeriod)
+    % DisplayNodeStateLogs - Display a timeline showing the state of each
+    % node
+
+    NodeCount = length(NodeStateLogs(:,1));
+    
+    NumRows = NodeCount;
+    NumCols = 1;
+    PlotCount = 1;
+    figure('NumberTitle','off', 'Name','Node State Logs', 'Position',[50 50 1200 800])
+    sgtitle('Node State Logs');
+    axes = [];
+
+    t = StepPeriod*(0:length(NodeStateLogs(1,:))-1);
+    
+    for NodeIdx = 1:NodeCount
+        ax = subplot(NumRows, NumCols, PlotCount);   
+        axes = [axes ax];
+        %plot(t(NodeStateLogs(NodeIdx,:) > 0), NodeStateLogs(NodeIdx, NodeStateLogs(NodeIdx,:) > 0 ), 'LineStyle','none', 'Marker','.', 'Color','r');
+       
+        stem(t(NodeStateLogs(NodeIdx,:) == 1), NodeStateLogs(NodeIdx, NodeStateLogs(NodeIdx,:) == 1), 'Color','b');
+        hold on;
+        stem(t(NodeStateLogs(NodeIdx,:) == 2), NodeStateLogs(NodeIdx, NodeStateLogs(NodeIdx,:) == 2), 'Color','r');
+        hold off;
+        title(['Node ' NodeLabels(NodeIdx)]);
+        xlabel('Time (s)');
+        ylabel('Node State');
+        ylim([-0.1 2.1]);
+
+        yticks([0, 1, 2]);
+        yticklabels({'Listening', 'Receiving', 'Transmitting'});
+        grid on;
+           
+        
+        PlotCount = PlotCount + 1;
+    end
+
+    linkaxes(axes,'x');
+    axes(1).XLim = [-10 max(t)+10];
+
+end
 
 
 % Container Structs
