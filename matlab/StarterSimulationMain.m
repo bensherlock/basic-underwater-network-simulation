@@ -2,7 +2,7 @@
 %    All in one matlab file. 
 %    Providing node locations and configuring the acoustic properties of
 %    the channel we can derive the propagation delay and packet success
-%    probabilities between two nodes. Knowing these measn we can simulate
+%    probabilities between two nodes. Knowing these means we can simulate
 %    different scenarios in a relatively straightforward way.
 %
 %   Benjamin Sherlock, Newcastle University, 2023
@@ -35,22 +35,30 @@ ModemBandwidth = 8000.0;
 
 
 % Node position: [ [x, y, depth]; ... ]
+%NodePositions = [ ...
+%        [0.0, 0.0, 10.0]; ... 
+%        [900.0, 500.0, 10.0]; ...
+%        [1100.0, -900.0, 10.0]; ...
+%        [1900.0, -50.0, 10.0]; ...
+%        [2400.0, -2000.0, 10.0] ...
+%    ];
+
 NodePositions = [ ...
         [0.0, 0.0, 10.0]; ... 
-        [900.0, 500.0, 10.0]; ...
-        [1100.0, -900.0, 10.0]; ...
-        [1900.0, -50.0, 10.0]; ...
-        [2400.0, -2000.0, 10.0] ...
+        [1900.0, 800.0, 30.0]; ...
+        [1400.0, -1000.0, 30.0]; ...
     ];
 
 % Calculate the Node Count
 NodeCount = length(NodePositions(:,1));
 
 % Node label: ['Name'; 'Name'; ... ]
-NodeLabels = ['A'; 'B'; 'C'; 'D'; 'E'];
+%NodeLabels = ['A'; 'B'; 'C'; 'D'; 'E'];
+NodeLabels = ['A'; 'B'; 'C'];
 
 % Node addresses: [ 1; 2; 3; ... ]
-NodeAddresses = [1; 2; 3; 4; 5];
+%NodeAddresses = [1; 2; 3; 4; 5];
+NodeAddresses = [1; 2; 3];
 
 
 % Generate Lookup Tables
@@ -104,7 +112,6 @@ function RunSimulationA(NodePropagationDelays, NodeDeliveryProbabilities, NodeLa
             Channels{FromIdx, ToIdx} = {}; % Empty Queue of Transmitted Packets
         end
     end
-    ChannelsCount = NodeCount*NodeCount;
 
 
     % Create the queues for transmitted packets
@@ -123,160 +130,240 @@ function RunSimulationA(NodePropagationDelays, NodeDeliveryProbabilities, NodeLa
     NodeStateLogs = zeros(NodeIdx, RunStepCount);
     NodeStateListening = 0;
     NodeStateReceiving = 1;
-    NodeStateTransmitting = 2;
+    NodeStateReceivedSuccessfully = 2;
+    NodeStateTransmitting = 3;
 
 
-    for IterationIdx = 1:IterationCount
+    % Scenario - Acks
+    NodeAwaitingAcks = zeros(NodeCount, 1);
+    NodePacketsToResend = cell(NodeCount);
+    NodeRetriesCount = zeros(NodeCount, 1);
+    TimeBetweenRetries = 5.0; % (s)
+    MaxRetries = 3;
+
         
-        % Optimsations to speed up the simulation
-        ChannelsEmpty = true;
-        TransmittedPacketsEmpty = true;
-        ReceivedPacketsEmpty = true;
+    % Optimsations to speed up the simulation
+    ChannelsEmpty = true;
+    TransmittedPacketsEmpty = true;
+    ReceivedPacketsEmpty = true;
 
-        ProcessStartTime = tic;
-        for StepIdx = 1:RunStepCount
-            CurrentTime = (StepIdx-1) * StepPeriod;
+    % Simulator Mainloop
+    ProcessStartTime = tic;
+    for StepIdx = 1:RunStepCount
+        CurrentTime = (StepIdx-1) * StepPeriod;
 
-            % Update printout
-            if mod((StepIdx-1), StepFrequency*600) == 0
-                ProcessTime = toc(ProcessStartTime);
-                fprintf('%09.3fs :Tick: Elapsed Time Since Last Tick=%0.3fs \n', CurrentTime, ProcessTime);
-                ProcessStartTime = tic;
-            end
+        % Update printout
+        if mod((StepIdx-1), StepFrequency*600) == 0
+            ProcessTime = toc(ProcessStartTime);
+            fprintf('%09.3fs :Tick: Elapsed Time Since Last Tick=%0.3fs \n', CurrentTime, ProcessTime);
+            ProcessStartTime = tic;
+        end
 
-            % User Scenario: Nodes create transmissions at certain times
-            for NodeIdx = 1:NodeCount
-                
+        % User Code: Act on Timestamp
+        % Nodes create transmissions at certain times
+        for NodeIdx = 1:NodeCount
+            
+            if NodeIdx > 1 % Sensor Nodes Only
                 %if mod(StepIdx-1, NodeTransmitStepCounts(NodeIdx)) == 0
                 if StepIdx-1 == NodeTransmitStepCounts(NodeIdx)
-                    % Transmit Sensor Data
-
+                    % Transmit New Sensor Data
+    
                     SourceAddress = NodeAddresses(NodeIdx);
                     DestinationAddress = NodeAddresses(1);
-                    PayloadBytes = ['H', 'e', 'l', 'l', 'o'];                    
+                    PayloadBytes = ['S', 'e', 'n', 's', 'o', 'r', ' ', 'D', 'a', 't', 'a'];
                     TransmitStartTime = CurrentTime;
                     TransmitDuration = (length(PayloadBytes) * 8) / ModemBitRate;
-
+    
                     % Construct a Packet struct
                     TxPacket = Packet(SourceAddress, DestinationAddress, PayloadBytes, TransmitStartTime, TransmitDuration);
                     
-                    % The modem is omni directional so all outgoing 
-                    % channels from this node will potentially deliver the
-                    % packet.
-                    
+                    % Put the Transmit packet in the queue for the simulator
+                    % core to handle.
                     TransmittedPackets{NodeIdx}{length(TransmittedPackets{NodeIdx})+1} = TxPacket;
                     TransmittedPacketsEmpty = false;
-        
+    
+                    % Store information for handling Acks/Retries
+                    NodeAwaitingAcks(NodeIdx) = 1;
+                    NodePacketsToResend{NodeIdx} = TxPacket;
+                    NodeRetriesCount(NodeIdx) = 0;
+       
+                elseif NodeAwaitingAcks(NodeIdx)
+                    % Check for Timeout
+                    if CurrentTime >= NodePacketsToResend{NodeIdx}.TransmitStartTime + TimeBetweenRetries
+                        % Check if we have any retries left for this packet
+                        if NodeRetriesCount(NodeIdx) < MaxRetries
+                            % Resend
+                            TxPacket = NodePacketsToResend{NodeIdx};
+                            TxPacket.TransmitStartTime = CurrentTime; % Update the Transmit Time Information
+    
+                            % Put the Transmit packet in the queue for the simulator
+                            % core to handle.
+                            TransmittedPackets{NodeIdx}{length(TransmittedPackets{NodeIdx})+1} = TxPacket;
+                            TransmittedPacketsEmpty = false;
+    
+                            % Increment the retry count
+                            NodeRetriesCount(NodeIdx) = NodeRetriesCount(NodeIdx) + 1;
+                            NodePacketsToResend{NodeIdx} = TxPacket;
+                        else
+                            % We have sent it multiple times already.
+                            NodeAwaitingAcks(NodeIdx) = 0;
+                            NodePacketsToResend{NodeIdx} = [];
+                            NodeRetriesCount(NodeIdx) = 0;
+                        end
+                    end
+    
+                end
+            end
+        end
 
-                    % Recording the transmitting state
-                    %idx = sub2ind(size(NodeStateLogs),NodeIdx, StepIdx:StepIdx+floor(TxPacket.TransmitDuration*StepPeriod));
-                    %NodeStateLogs(sub2ind(size(NodeStateLogs),NodeIdx, StepIdx:StepIdx+floor(TxPacket.TransmitDuration*StepPeriod))) = NodeStateTransmitting;
-                    NodeStateLogs(NodeIdx, StepIdx:StepIdx+floor(TxPacket.TransmitDuration*StepFrequency)) = NodeStateTransmitting;
 
-                    fprintf(['%09.3fs :Tx: ' 'Node ' NodeLabels(NodeIdx) ' has transmitted a packet. '], CurrentTime);
+        % Simulator Core:
+        if ~TransmittedPacketsEmpty
+            % Outgoing Transmissions from each of the modems into the channels
+            for FromIdx = 1:NodeCount
+                while ~isempty(TransmittedPackets{FromIdx})
+                    % The From Node has a packet to send
+                    % Get from the head of the queue
+                    TxPacket = TransmittedPackets{FromIdx}{1};
+                    % Delete from queue
+                    TransmittedPackets{FromIdx}(1) = [];
+
+                    % Send the packet to all outgoing channels from
+                    % this node
+                    for ToIdx = 1:NodeCount
+                        if ToIdx ~= FromIdx  % Don't transmit to itself
+                            % Send the packet and append to the Channel queue.
+                            Channels{FromIdx, ToIdx}{length(Channels{FromIdx, ToIdx})+1} = TxPacket;
+                            ChannelsEmpty = false;                           
+                        end
+                    end
+
+                    % Recording the transmitting state                    
+                    NodeStateLogs(FromIdx, StepIdx:StepIdx+floor(TxPacket.TransmitDuration*StepFrequency)) = NodeStateTransmitting;
+
+                    fprintf(['%09.3fs :Tx: ' 'Node ' NodeLabels(FromIdx) ' has transmitted a packet. '], CurrentTime);
                     PrintPacket(TxPacket);
                     fprintf('\n');
                 end
+                TransmittedPacketsEmpty = true;
             end
-
-            if ~TransmittedPacketsEmpty
-                % Outgoing Transmissions from each of the modems into the channels
-                for FromIdx = 1:NodeCount
-                    while ~isempty(TransmittedPackets{FromIdx})
-                        % The From Node has a packet to send
-                        TxPacket = TransmittedPackets{FromIdx}{1};
-                        % Delete from queue
-                        TransmittedPackets{FromIdx}(1) = [];
-    
-                        % Send the packet to all outgoing channels from
-                        % this node
-                        for ToIdx = 1:NodeCount
-                            if ToIdx ~= FromIdx  % Don't transmit to itself
-                                % Send the packet and append to the Channel queue.
-                                Channels{FromIdx, ToIdx}{length(Channels{FromIdx, ToIdx})+1} = TxPacket;
-    
-                                ChannelsEmpty = false;                           
-                            end
-                        end
-                    end
-                    TransmittedPacketsEmpty = true;
-                end
-            end
-
-
-            % Only process the propagation if there are packets in the
-            % channels. Thsi helps to speed up the simulation.
-            if ~ChannelsEmpty
-                ChannelsEmpty = true;  % Set the flag but we will check each individual channel anyway.
-
-                % Propagation of packets through the channels to the receiving modems
-                for FromIdx = 1:NodeCount
-                    for ToIdx = 1:NodeCount
-    
-                        % If there are packets in the channel, check to see if
-                        % they have now arrived at the destination.
-                        if ~isempty(Channels{FromIdx, ToIdx})
-                            ChannelsEmpty = false;  % Not empty so clear the flag
-
-                            if (CurrentTime >= (Channels{FromIdx, ToIdx}{1}.TransmitStartTime ... 
-                                + Channels{FromIdx, ToIdx}{1}.TransmitDuration ...
-                                + NodePropagationDelays(FromIdx, ToIdx) ) )   
-    
-                                % Get packet at the head of the queue
-                                RxPacket = Channels{FromIdx, ToIdx}{1};
-                                % Delete from queue
-                                Channels{FromIdx, ToIdx}(1) = [];
-
-                                % Recording the receiving state
-                                NodeStateLogs(ToIdx, StepIdx-floor(RxPacket.TransmitDuration*StepFrequency):StepIdx) = NodeStateReceiving;
-        
-                                % Use the probability of packet success and randmise
-                                % whether this packet will arrive at the destination.
-                                ProbabilityOfPacketDelivery = NodeDeliveryProbabilities(FromIdx, ToIdx);
-                                if rand(1) < ProbabilityOfPacketDelivery
-                                    % Only if the random number (0.0->1.0) is less than
-                                    % the probability of delivery did the
-                                    % packet arrive.
-
-                                    % Put the packet into received packet queue for the
-                                    % destination node to process in the next stage.
-                                    ReceivedPackets{ToIdx}{length(ReceivedPackets{ToIdx})+1} = RxPacket;
-    
-                                    ReceivedPacketsEmpty = false;
-                                end
-
-                                
-                            end
-                        end
-                    end
-                end
-
-            end
-
-
-            if ~ReceivedPacketsEmpty
-                % Nodes act on received packets
-                for NodeIdx = 1:NodeCount
-                    while ~isempty(ReceivedPackets{NodeIdx})
-                        % This node has just received some packets
-        
-                        % Get the Packet at the head of the queue
-                        RxPacket = ReceivedPackets{NodeIdx}{1};
-                        % Delete from queue
-                        ReceivedPackets{NodeIdx}(1) = [];
-    
-                        fprintf(['%09.3fs :Rx: ' 'Node ' NodeLabels(NodeIdx) ' has received a packet. '], CurrentTime);
-                        PrintPacket(RxPacket);
-                        fprintf('\n');
-    
-                    end
-                    ReceivedPacketsEmpty = true;
-                end
-            end
-        
         end
 
+
+        % Simulator Core: 
+        % Only process the propagation if there are packets in the
+        % channels. This helps to speed up the simulation.
+        if ~ChannelsEmpty
+            ChannelsEmpty = true;  % Set the flag but we will check each individual channel anyway.
+
+            % Propagation of packets through the channels to the receiving modems
+            for FromIdx = 1:NodeCount
+                for ToIdx = 1:NodeCount
+
+                    % If there are packets in the channel, check to see if
+                    % they have now arrived at the destination.
+                    if ~isempty(Channels{FromIdx, ToIdx})
+                        ChannelsEmpty = false;  % Not empty so clear the flag
+
+                        % CurrentTime >= TransmitStartTime + TransmitDuration + PropagationDelay
+                        if (CurrentTime >= (Channels{FromIdx, ToIdx}{1}.TransmitStartTime ... 
+                            + Channels{FromIdx, ToIdx}{1}.TransmitDuration ...
+                            + NodePropagationDelays(FromIdx, ToIdx) ) )   
+
+                            % Get packet at the head of the queue
+                            RxPacket = Channels{FromIdx, ToIdx}{1};
+                            % Delete from queue
+                            Channels{FromIdx, ToIdx}(1) = [];
+
+                            % Recording the receiving state
+                            NodeStateLogs(ToIdx, StepIdx-floor(RxPacket.TransmitDuration*StepFrequency):StepIdx) = NodeStateReceiving;
+    
+                            % Use the probability of packet success and randmise
+                            % whether this packet will arrive at the destination.
+                            ProbabilityOfPacketDelivery = NodeDeliveryProbabilities(FromIdx, ToIdx);
+                            if rand(1) < ProbabilityOfPacketDelivery
+                                % Only if the random number (0.0->1.0) is less than
+                                % the probability of delivery did the
+                                % packet arrive.
+
+                                % Put the packet into received packet queue for the
+                                % destination node to process in the next stage.
+                                ReceivedPackets{ToIdx}{length(ReceivedPackets{ToIdx})+1} = RxPacket;                                
+                                ReceivedPacketsEmpty = false;
+
+                                fprintf(['%09.3fs :Rx: ' 'Node ' NodeLabels(ToIdx) ' has received a packet. '], CurrentTime);
+                                PrintPacket(RxPacket);
+                                fprintf('\n');
+
+                                % Recording the received successfully state
+                                NodeStateLogs(ToIdx, StepIdx) = NodeStateReceivedSuccessfully;
+                            end
+
+                            
+                        end
+                    end
+                end
+            end
+        end
+
+
+        % User Code: Act on Received Packets
+        if ~ReceivedPacketsEmpty
+            
+            for NodeIdx = 1:NodeCount
+                while ~isempty(ReceivedPackets{NodeIdx})
+                    % This node has just received some packets
+    
+                    % Get the Packet at the head of the queue
+                    RxPacket = ReceivedPackets{NodeIdx}{1};
+                    % Delete from queue
+                    ReceivedPackets{NodeIdx}(1) = [];
+
+                    % Process the packet here. 
+                    if RxPacket.DestinationAddress == NodeAddresses(NodeIdx)
+                        % This packet is addressed to the current node
+                        if NodeIdx == 1 % This is the Gateway Node
+                            % Sensor Data Received
+                            fprintf('%09.3fs :Gateway: Has Received Sensor Data From %d\n', CurrentTime, RxPacket.SourceAddress);
+                            
+                            % Send an Acknowledgment
+                            SourceAddress = NodeAddresses(NodeIdx);
+                            DestinationAddress = RxPacket.SourceAddress;
+                            PayloadBytes = ['A', 'c', 'k'];                    
+                            TransmitStartTime = CurrentTime;
+                            TransmitDuration = (length(PayloadBytes) * 8) / ModemBitRate;
+            
+                            % Construct a Packet struct
+                            TxPacket = Packet(SourceAddress, DestinationAddress, PayloadBytes, TransmitStartTime, TransmitDuration);
+                            
+                            % Put the Transmit packet in the queue for the simulator
+                            % core to handle.
+                            TransmittedPackets{NodeIdx}{length(TransmittedPackets{NodeIdx})+1} = TxPacket;
+                            TransmittedPacketsEmpty = false;
+
+                            fprintf('%09.3fs :Gateway: Sending Acknowledgment To %d\n', CurrentTime, TxPacket.DestinationAddress);
+
+                        else % This is a Sensor Node
+                            % Acknowledgement Received
+                            if RxPacket.SourceAddress == NodeAddresses(1)
+                                fprintf('%09.3fs :Sensor: Has Received Acknowledgment From %d\n', CurrentTime, RxPacket.SourceAddress);
+
+                                % Clear the retry information
+                                NodeAwaitingAcks(NodeIdx) = 0;
+                                NodePacketsToResend{NodeIdx} = [];
+                                NodeRetriesCount(NodeIdx) = 0;
+                            end
+                        end
+                    end
+
+                end
+                ReceivedPacketsEmpty = true;
+            end
+        end
+    
     end
+
+
 
     DisplayNodeStateLogs(NodeStateLogs, NodeLabels, StepPeriod);
 
@@ -548,17 +635,18 @@ function DisplayNodeStateLogs(NodeStateLogs, NodeLabels, StepPeriod)
         axes = [axes ax];
         %plot(t(NodeStateLogs(NodeIdx,:) > 0), NodeStateLogs(NodeIdx, NodeStateLogs(NodeIdx,:) > 0 ), 'LineStyle','none', 'Marker','.', 'Color','r');
        
-        stem(t(NodeStateLogs(NodeIdx,:) == 1), NodeStateLogs(NodeIdx, NodeStateLogs(NodeIdx,:) == 1), 'Color','b');
-        hold on;
-        stem(t(NodeStateLogs(NodeIdx,:) == 2), NodeStateLogs(NodeIdx, NodeStateLogs(NodeIdx,:) == 2), 'Color','r');
+        stem(t(NodeStateLogs(NodeIdx,:) == 1), NodeStateLogs(NodeIdx, NodeStateLogs(NodeIdx,:) == 1), 'Color','#CCCCCC', 'Marker','none');
+        hold on;        
+        stem(t(NodeStateLogs(NodeIdx,:) == 3), NodeStateLogs(NodeIdx, NodeStateLogs(NodeIdx,:) == 3), 'Color','#999999', 'Marker','none');
+        stem(t(NodeStateLogs(NodeIdx,:) == 2), NodeStateLogs(NodeIdx, NodeStateLogs(NodeIdx,:) == 2), 'Color','#222222', 'LineWidth',1.5, 'Marker','x', 'MarkerSize',10);
         hold off;
         title(['Node ' NodeLabels(NodeIdx)]);
         xlabel('Time (s)');
         ylabel('Node State');
-        ylim([-0.1 2.1]);
+        ylim([-0.1 3.1]);
 
-        yticks([0, 1, 2]);
-        yticklabels({'Listening', 'Receiving', 'Transmitting'});
+        yticks([0, 1, 2, 3]);
+        yticklabels({'Listening', 'Receiving', 'Received OK', 'Transmitting'});
         grid on;
            
         
