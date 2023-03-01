@@ -77,15 +77,16 @@ PrintNodeDeliveryProbabilities(NodeDeliveryProbabilities, NodeLabels);
 
 % Display the scene
 DisplayNodes(NodePositions, NodeLabels, NodeDeliveryProbabilities);
+drawnow;
 
 % Run a simulation
-RunSimulationA(NodePropagationDelays, NodeDeliveryProbabilities, NodeLabels, NodeAddresses, 1);
+RunSimulationA(NodePositions, NodePropagationDelays, NodeDeliveryProbabilities, NodeLabels, NodeAddresses, SpeedOfSound, 1);
 
 
 % Simulation Functions
 % ========================================================================
 
-function RunSimulationA(NodePropagationDelays, NodeDeliveryProbabilities, NodeLabels, NodeAddresses, IterationCount)
+function RunSimulationA(NodePositions, NodePropagationDelays, NodeDeliveryProbabilities, NodeLabels, NodeAddresses, SpeedOfSound, IterationCount)
     % RunSimulationA - This simulation runs a scenario where each sensor
     % node periodically transmits data to the gateway node (1). 
 
@@ -147,6 +148,10 @@ function RunSimulationA(NodePropagationDelays, NodeDeliveryProbabilities, NodeLa
     TransmittedPacketsEmpty = true;
     ReceivedPacketsEmpty = true;
 
+    % Visualisation
+    AnimationFigHandle = CreateAcousticPropagationFigure(NodePositions, NodeLabels);
+    AnimationUpdated = false;
+
     % Simulator Mainloop
     ProcessStartTime = tic;
     for StepIdx = 1:RunStepCount
@@ -157,6 +162,20 @@ function RunSimulationA(NodePropagationDelays, NodeDeliveryProbabilities, NodeLa
             ProcessTime = toc(ProcessStartTime);
             fprintf('%09.3fs :Tick: Elapsed Time Since Last Tick=%0.3fs \n', CurrentTime, ProcessTime);
             ProcessStartTime = tic;
+        end
+
+        % Visualisation printout
+        if mod((StepIdx-1), StepFrequency*0.1) == 0
+            if ~ChannelsEmpty
+                UpdateAcousticPropagationFigure(AnimationFigHandle, NodePositions, NodeLabels, Channels, SpeedOfSound, CurrentTime)
+                drawnow;
+                AnimationUpdated = false;
+            elseif ~AnimationUpdated
+                UpdateAcousticPropagationFigure(AnimationFigHandle, NodePositions, NodeLabels, Channels, SpeedOfSound, CurrentTime)
+                drawnow;
+                AnimationUpdated = true;
+            end
+
         end
 
         % User Code: Act on Timestamp
@@ -658,6 +677,131 @@ function DisplayNodeStateLogs(NodeStateLogs, NodeLabels, StepPeriod)
 
 end
 
+
+function FigHandle = CreateAcousticPropagationFigure(NodePositions, NodeLabels)
+    % CreateAcousticPropagationFigure
+
+    FigHandle = figure;
+    % Set size
+    FigHandle.Position = [100 100 800 600];
+
+    LimitsMargin = 500.0;
+    Xlimits = [min(NodePositions(:,1))-LimitsMargin, max(NodePositions(:,1))+LimitsMargin];
+    Ylimits = [min(NodePositions(:,2))-LimitsMargin, max(NodePositions(:,2))+LimitsMargin];
+    Zlimits = [0.0, max(NodePositions(:,3))+LimitsMargin];
+
+    % 3D view
+    scatter3(NodePositions(:,1), NodePositions(:,2), NodePositions(:,3), 'filled');
+    hold on;
+    text(NodePositions(:,1), NodePositions(:,2), NodePositions(:,3), NodeLabels(:));
+    hold off;
+
+    xlim(Xlimits);
+    ylim(Ylimits);
+    zlim(Zlimits);
+
+    title('Node Positions');
+
+    xlabel('X (m)');
+    ylabel('Y (m)');
+    zlabel('Depth (m)');
+
+    % Reverse direction of Z axis so that increasing depth goes downwards.
+    FigHandle.CurrentAxes.ZDir = 'Reverse';  
+
+    %view(0, 90);
+    view(2);
+
+    axis square;
+
+end
+
+function UpdateAcousticPropagationFigure(FigHandle, NodePositions, NodeLabels, Channels, SpeedOfSound, CurrentTime)
+    % UpdateAcousticPropagationFigure - Update the existing figure with current position of acoustic
+    % propagations.
+
+    if isempty(FigHandle)
+        FigHandle = figure; 
+    else
+        FigHandle = figure(FigHandle); 
+
+        % If we're updating an existing figure then only delete the
+        % axes lines. Leaving the rest intact.
+        axes = findobj(FigHandle, 'type', 'axes', '-not', 'tag', 'legend', '-not', 'tag', 'Colorbar');
+        if ~isempty(axes)                
+            delete(axes.Children);
+        end
+    end
+
+    LimitsMargin = 500.0;
+    Xlimits = [min(NodePositions(:,1))-LimitsMargin, max(NodePositions(:,1))+LimitsMargin];
+    Ylimits = [min(NodePositions(:,2))-LimitsMargin, max(NodePositions(:,2))+LimitsMargin];
+    Zlimits = [0.0, max(NodePositions(:,3))+LimitsMargin];
+
+    % 3D view
+    scatter3(NodePositions(:,1), NodePositions(:,2), NodePositions(:,3), 'filled');
+    hold on;
+    text(NodePositions(:,1), NodePositions(:,2), NodePositions(:,3), NodeLabels(:));
+    hold off;
+
+    xlim(Xlimits);
+    ylim(Ylimits);
+    zlim(Zlimits);
+
+    title('Node Positions');
+
+    xlabel('X (m)');
+    ylabel('Y (m)');
+    zlabel('Depth (m)');
+
+    % Reverse direction of Z axis so that increasing depth goes downwards.
+    FigHandle.CurrentAxes.ZDir = 'Reverse';  
+
+    hold on;
+    NodeCount = length(NodePositions(:,1));
+    for FromIdx = 1:NodeCount
+        % Centre = NodePositions(FromIdx,1), NodePositions(FromIdx,2), NodePositions(FromIdx,3)
+        TxX = NodePositions(FromIdx,1);
+        TxY = NodePositions(FromIdx,2);
+        TxZ = NodePositions(FromIdx,3);
+
+        for ToIdx = 1:NodeCount
+            if ~isempty(Channels{FromIdx, ToIdx})
+                % Packets in transit so display the acoustic waves.
+                for PacketIdx = 1:length(Channels{FromIdx, ToIdx})
+                    Packet = Channels{FromIdx, ToIdx}{PacketIdx};
+                    OuterDiameter = (CurrentTime - Packet.TransmitStartTime) * SpeedOfSound;
+                    InnerDiameter =  (CurrentTime - Packet.TransmitStartTime - Packet.TransmitDuration) * SpeedOfSound;
+                    if InnerDiameter < 0
+                        % Still being transmitted
+                        InnerDiameter = 0;
+                    end
+
+                    % Plot Circles
+                    if OuterDiameter > 0
+                        color = '#F7DC6F';
+                        t = linspace(0, 2*pi, 32);
+                        OuterCircle = polyshape(TxX + OuterDiameter*cos(t), TxY + OuterDiameter*sin(t), 'Simplify',false);
+                        Wave = OuterCircle;
+                        if InnerDiameter > 0
+                            InnerCircle = polyshape(TxX + InnerDiameter*cos(t), TxY + InnerDiameter*sin(t), "Simplify",false);
+                            Wave = subtract(OuterCircle, InnerCircle);
+                        end
+                        plot(Wave, "FaceColor",color, "EdgeColor",color);
+                    end
+                  
+
+                end
+            end
+        end
+    end
+    hold off;
+
+    %view(0, 90);
+    view(2);
+
+    axis square;
+end
 
 % Container Structs
 % ========================================================================
